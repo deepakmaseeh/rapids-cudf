@@ -23,15 +23,15 @@ layout:
 environment:
     base:
         registry: nvcr.io
-        image: nvidia/rapidsai/notebooks:25.08-cuda12.9-py3.13
+        image: nvidia/rapidsai/notebooks:26.04-cuda13-py3.12
         build_timestamp: ""
-        name: RAPIDS with CUDA 12.9.1
+        name: RAPIDS with CUDA 13.1.1
         supported_architectures: []
-        cuda_version: 12.9.1
-        description: RAPIDS with CUDA 12.9.1
+        cuda_version: 13.1.1
+        description: RAPIDS with CUDA 13.1.1
         entrypoint_script: /home/rapids/entrypoint.sh
         labels:
-            - cuda12.9.1
+            - cuda13.1.1
         apps:
             - name: jupyterlab
               type: jupyterlab
@@ -52,10 +52,10 @@ environment:
         programming_languages:
             - python3
         icon_url: ""
-        image_version: 25.08.01
+        image_version: 26.04.00
         os: linux
         os_distro: ubuntu
-        os_distro_release: "22.04"
+        os_distro_release: "24.04"
         schema_version: v2
         user_info:
             uid: "1001"
@@ -75,11 +75,9 @@ environment:
                 - cugraph
                 - rmm
                 - pylibraft
-                - cuspatial
                 - cuxfilter
                 - cucim
                 - xgboost
-                - dask-sql
                 - jupyterlab
             - name: pip
               binary_path: /opt/conda/bin/pip
@@ -107,6 +105,16 @@ execution:
             proxy:
                 trim_prefix: false
             url_command: jupyter lab list 2>&1 | head -n 2 | tail -n 1 | cut -f1 -d' ' | grep -v 'Currently'
+        - name: Cursor
+          type: cursor
+          class: native
+          start_command: ""
+          health_check_command: '[ \$(ps aux | grep ".cursor-server" | grep -v grep | wc -l ) -gt 4 ] && [ \$(ps aux | grep "/.cursor-server/bin/.*/node .* net.createConnection" | grep -v grep | wc -l) -gt 0 ]'
+          stop_command: ""
+          user_msg: ""
+          logfile_path: ""
+          timeout_seconds: 120
+          icon_url: ""
     resources:
         gpu:
             requested: 1
@@ -121,3 +129,7 @@ execution:
           target: /data/tensorboard/logs/
           description: Tensorboard Log Files
           options: volumeName=tensorboard-logs-volume
+        - type: volume
+          target: /nvwb-shared-volume/
+          description: ""
+          options: volumeName=nvwb-shared-volume

@@ -10,3 +10,4 @@
 *bash.PostBuild
 *jupyterlab.JupyterLab
 *vs_code.VSCode
+*cursor.Cursor

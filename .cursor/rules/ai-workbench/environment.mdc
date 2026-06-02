@@ -1,0 +1,172 @@
+---
+description: NVIDIA AI Workbench project container rules - installing packages (apt.txt, requirements.txt, pip), build scripts (preBuild.bash, postBuild.bash), environment variables (variables.env), GPU/CUDA setup, and container rebuild/restart in AI Workbench
+alwaysApply: false
+---
+# Project Container Environment Management
+
+The project container is built and started using a combination of familiar configuration files and the `.project/spec.yaml` file.
+
+A Dockerfile is dynamically rendered by AI Workbench from this information. You do not have direct access to this Dockerfile OR the build context, which is managed by AI Workbench.
+
+**CRITICAL: IF YOU WANT TO MANIPULATE OR UNDERSTAND THE PROJECT SPECIFICATION YOU MUST REFERENCE RULES IN `.cursor/rules/ai-workbench/project_spec.mdc`**
+
+## Environment Configuration Files
+
+The container is built using these files in order:
+
+### 1. `preBuild.bash`
+- Runs first during container build
+- Has passwordless `sudo` access
+- Use for: pre-installation setup, adding repos, system configuration
+
+### 2. `apt.txt`
+- System packages installed via `apt-get`
+- **Format**: One package name per line
+- Example:
+  ```
+  ffmpeg
+  libgl1-mesa-glx
+  ```
+
+### 3. `requirements.txt`
+- Python packages installed via `pip`
+- **Pin versions when confident** for reproducibility
+- Example:
+  ```
+  numpy==1.24.0
+  pandas>=2.0
+  torch
+  ```
+- **CRITICAL:** the `--index-url` or `--extra-index-url` flag is not supported in the requirements.txt file. If you need this you should pip install directly in either the preBuild.bash or postBuild.bash script. If installing something like pytorch (that many other packages depend on) use the preBuild.bash script so torch is already available while the requirements.txt file is being installed.
+
+  Example in `preBuild.bash` for PyTorch with specific CUDA:
+  ```bash
+  pip install torch --index-url https://download.pytorch.org/whl/cu130
+  ```
+
+- **CRITICAL:** Do not put comments inline with packages. Comments can only go on a new line.
+
+  Acceptable:
+  ```
+  # Package required for XYZ
+  package1==2.3.4
+  ```
+
+  DO NOT DO THIS:
+  ```
+  package1==2.3.4  # Package required for XYZ
+  ```
+
+### 4. `postBuild.bash`
+- Runs last during container build
+- Has passwordless `sudo` access
+- Use for: post-installation configuration, creating directories, downloading files, installing tools, etc.
+
+### 5. `variables.env`
+- Environment variables sourced when container starts
+- **Format**: `KEY=VALUE`, one per line
+- A comment above the key-value pair can be used to add a description in the AI Workbench UI
+- **CRITICAL: Do NOT store secrets here** (committed to git)
+- Changes require container restart
+- Variables are injected into the container at start
+
+Example:
+
+```
+# My variable for my app
+MY_VAR_1=12345
+```
+
+## Build Order
+
+```
+preBuild.bash → apt install → pip install → postBuild.bash
+```
+
+
+## Installing Packages
+
+### Python packages (preferred)
+1. Add to `requirements.txt`
+2. You CAN run `pip install <package>` in the running container for immediate use
+3. If the base environment is configured with a `package_manager_environment` you need to call the specified pip binary to use the associated virtual/conda environment.
+4. **Always** also add to `requirements.txt` for persistence. If you pre-installed directly, check the installed version and pin when adding to requirements.txt
+5. Tell user to rebuild for a clean environment, but rebuild and restart is not required if you are pre-installing pip packages directly.
+
+### System packages
+1. Add to `apt.txt`
+2. Cannot be installed in running container (no sudo)
+3. Tell user to rebuild container
+
+## When User Needs to Rebuild
+
+After changes to these files, instruct the user to **rebuild and restart the container from AI Workbench, then reconnect from Cursor once the container has started**:
+- `apt.txt`
+- `preBuild.bash`
+- `postBuild.bash`
+- `requirements.txt` (only if you didn't `pip install` in the running container)
+
+After changes to `variables.env`, instruct the user to **restart the container** (no rebuild needed).
+
+
+## GPU and CUDA Support
+
+To use a GPU in the project container, the Base Environment will have CUDA installed in the container. This means the CUDA version to use may differ from what the driver reports.
+
+**CRITICAL: Always check the version of CUDA and use this when installing version dependent packages (e.g. torch).** 
+
+- Do not use the driver/nvidia-smi as a check since this reports driver capabilities, not what version of CUDA is actually present.
+- Check CUDA version with:
+  ```bash
+  echo $CUDA_VERSION
+  # or
+  nvcc --version | grep release
+  ```
+
+
+### GPU Reservations
+AI Workbench manages GPU resources by explicitly passing GPUs into containers. On a multi-GPU system you may not see all host GPUs in a given container.
+
+There are two operating modes:
+- `exclusive`: this is the default behavior that is almost always in use. The project container can request 0-N entire GPUs. These GPUs will be reserved and not given to any other containers or projects
+- `shared`: GPU request count is ignored and all GPUs are provided to all containers.
+
+### GPUs in the project container
+The number of GPUs that are requested is specified in the `execution.resources.gpu.requested` value in the `spec.yaml` file.
+
+If there are not enough available GPUs the user can ignore and start without GPUs. When the container is started GPUs are reserved. When stopped they are released.
+
+### GPUs in Compose
+When using Compose you can specify the count (like the project container) OR you can specify by index to request specific GPUs. This is useful if you want multiple services to share a GPU, but is a little more fragile since AI Workbench can't manage assignments.
+
+### Special Cases
+**DGX Spark/GB10:** When running on a GB10 device (this is a GPU made by NVIDIA with 128GB of unified memory), AI Workbench will default the system to `shared` mode. Since there is one GPU with a very large amount of memory you want to share it. `nvidia-smi` will report `GB10` as the GPU in this case. When working on GB10 you should try to use CUDA 13 or later as this will provide best performance.
+
+
+## Critical Constraints
+
+### No sudo in running container
+- **`sudo` is NOT available** in the running container terminal
+- You cannot use `sudo` to install packages, inspect system files, or run privileged commands
+- If you need system-level changes, they must go in the build scripts (see below)
+
+### Build scripts have sudo
+- `preBuild.bash` and `postBuild.bash` run during container build with **passwordless sudo**
+- Use these for any operations requiring root privileges
+
+### When to rebuild vs restart
+
+**Must rebuild** (changes only apply during container build):
+- `apt.txt`
+- `preBuild.bash`
+- `postBuild.bash`
+
+**Rebuild optional** (if you `pip install` first, rebuild later for persistence):
+- `requirements.txt`
+
+**Restart only** (no rebuild needed):
+- `variables.env` - just restart the container to pick up changes
+
+## Multi-Container Environments (Docker Compose)
+
+AI Workbench can start additional containers "alongside" the mutable Project Container using docker compose. Review `.cursor/rules/ai-workbench/compose.mdc` for details and conventions.

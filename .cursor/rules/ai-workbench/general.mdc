@@ -1,0 +1,151 @@
+---
+description: NVIDIA AI Workbench project rules and core conventions
+alwaysApply: true
+---
+
+# NVIDIA AI Workbench Project Rules
+
+You are operating inside an **NVIDIA AI Workbench** project container. This is a specially managed containerized development environment. Understand these constraints and conventions.
+
+## AI Workbench Overview
+
+The AI Workbench application has both a Desktop and CLI interface. These are used to create and manage AI Workbench Projects. 
+
+A project is a Git repository with a specific set of configuration files that define a mutable, containerized development environment. Development tools and apps run inside this environment.
+
+AI Workbench renders a dockerfile from the configuration files and automates the use Docker/Podman to build and run the **project container**. 
+
+
+## Environment Overview
+
+- You are running inside a **project container** connected via Cursor's remote explorer extension
+- The project directory is always mounted at `/project` (bind mount from host). It is a git repo.
+- The **project container** may be running locally (same system as Cursor app) or remotely over SSH — AI Workbench handles this transparently
+- The terminal starts in `/project` by default
+- AI Workbench manages the lifecycle of this container (build, start, stop).
+
+**CRITICAL: IF YOU WANT TO MANIPULATE OR UNDERSTAND THE CONTAINER ENVIRONMENT YOU MUST REFERENCE `.cursor/rules/ai-workbench/environment.mdc`**
+
+## Project Directory Structure
+
+AI Workbench projects typically follow a default layout:
+
+```
+/project/
+├── code/           # Source code and analysis files (git-tracked)
+├── data/           # Data files (git-lfs tracked)
+│   └── scratch/    # Intermediate data products (git-ignored)
+├── models/         # Model weights & checkpoints (git-lfs tracked)
+├── .project/       # AI Workbench configuration
+│   └── spec.yaml   # Project specification (git-tracked)
+└── [environment files]
+└── README.md
+```
+
+### File placement guidelines
+- **Code, scripts, notebooks**: Place in `code/`. 
+- **Input data, datasets**: Place in `data/`
+- **Temporary/intermediate files**: Place in `data/scratch/` (not tracked)
+- **Model weights, checkpoints**: Place in `models/`
+- **Large or binary files**: Automatically handled by git-lfs for `data/` and `models/`
+
+If the project has a different structure than the defaults specified here, follow that instead — don't enforce this layout. Look at `.gitignore` and `.gitattributes` files to understand how data will be tracked.
+
+You can add to `.gitignore` and `.gitattributes` to manipulate how git tracks files.
+
+Modifying the `.project/spec.yaml` file can let you manage mounts, secrets, and apps configured in the project container. 
+
+**Rules for understanding and writing to the `.project/spec.yaml` are in `.cursor/rules/ai-workbench/project_spec.mdc`.**
+
+### README.md
+
+Edit the README file to document the project.
+
+**The `## Get Started` section is special.** The content of this section renders in the AI Workbench UI when opening a project to give "quick start" guidance. 
+
+Completely removing this section will remove the widget from the UI.
+
+For example you may give a short bulleted list of how to use the project, e.g. Start Jupyterlab, open this notebook, run all cells, etc.
+
+### Git and Large Files
+
+- This repo uses **git-lfs** for large/binary files
+- `.gitattributes` defines LFS patterns (currently: `models/**` and `data/**`)
+- Use git-lfs for files that are large or binary
+- By default, typically the `data/scratch/` directory is git-ignored for intermediate outputs
+
+## Multi-Container Environments (Docker Compose)
+
+AI Workbench can start additional containers "alongside" the mutable Project Container using docker compose. 
+
+**IMPORTANT: Review `.cursor/rules/ai-workbench/compose.mdc` for to understand how this works and conventions to use.**
+
+
+## Project Container or Compose?
+When working you must decide if changes should be in the **project container** or in **compose**.
+
+The project container is the primary development environment. It is good for:
+
+- Analysis files, code, notebooks, training files, etc.
+- Web apps (e.g. gradio)
+- Simple projects that don't need multiple different environments
+
+Compose containers are good for:
+
+- Additional services like inference servers, databases, etc.
+- When different components of your project need different environment configurations
+- Web apps that don't change much or aren't part of the "core development" tasks
+
+
+AI Workbench can launch IDEs like VS Code, Cursor, and Jupyterlab in the project container, but doesn't manage this experience with Compose containers.
+
+
+## Example Workflow: Adding HuggingFace Diffusers Support
+
+You can use multiple AI Workbench features together to make complex environment configuration changes tailored to containerized development.
+
+To add a library like `diffusers` with proper caching you would:
+
+1. **Install the package** - Add to `requirements.txt`:
+   ```
+   diffusers[torch]
+   ```
+
+   If you need to install pytorch, always make sure you install the correct CUDA version!
+
+   Ideally you would pin to a specific version if you are confident or install in the container then look it up.
+
+2. **Create a volume mount** for HF cache - Add to `execution.mounts` in the `spec.yaml` file:
+   ```yaml
+   - type: volume
+     target: /mnt/hf-cache/
+     description: HuggingFace cache
+     options: ""
+   ```
+
+3. **Set environment variable** - Add to `variables.env`:
+   ```
+   HF_HOME=/mnt/hf-cache
+   ```
+
+4. **Add secret for API key** - Add to `execution.secrets` in the `spec.yaml` file:
+   ```yaml
+   - variable: HF_TOKEN
+     description: HuggingFace API token for gated models
+   ```
+
+5. **Tell user**: Rebuild container and restart to apply all changes.
+
+
+See `.cursor/rules/ai-workbench/environment.mdc` for details on how to do this.
+
+## Best Practices
+
+1. **Keep code in `code/`** - maintains clean separation
+2. **Use `data/scratch/` for intermediate files** - keeps repo clean
+3. **Handle large files** - always put large files in a location that makes sense or git-lfs/gitignore so the repo does not blow up
+4. **Pin package versions** when confident — improves reproducibility and portability
+5. **Test pip installs in container first** - then add to requirements.txt. Also helps with version pinning accuracy
+6. **Document dependencies** - comment in requirements.txt/apt.txt why packages are needed. Comment in postBuild/preBuild scripts.
+7. **Never store secrets in `variables.env`** - it's committed to git! Use secrets in the .project/spec.yaml file.
+8. **Persist data and state with mounts** - Use volume mounts to persist data between container restarts. Useful for model caches, intermediate data, configuration data, etc.

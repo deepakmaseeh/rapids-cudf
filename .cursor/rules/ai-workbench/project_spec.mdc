@@ -1,0 +1,220 @@
+---
+description: Editing .project/spec.yaml for AI Workbench apps, mounts, secrets, resources, and base environment configuration
+alwaysApply: false
+---
+
+# Project Specification (`.project/spec.yaml`)
+
+The `spec.yaml` file is the main configuration for AI Workbench projects. It defines the container environment, applications, resources, and more that aren't represented with existing common files.
+
+## Project Metadata
+
+```yaml
+meta:
+  name: my-name             # Project name
+  image: project-my-name    # Docker image name when built locally
+  defaultBranch: main       # Default git branch
+```
+
+## Layout Section
+
+The `layout` section in spec.yaml controls git-lfs and gitignore patterns. **Don't edit this directly** — instead, modify `.gitattributes` and `.gitignore` files directly as you normally would.
+
+## Base Environment (`environment.base`)
+
+**Don't edit this directly - it is useful to understand the container's contents**
+
+Section that contains information about the base container (the `FROM` image):
+
+| Field | Description |
+|-------|-------------|
+| `registry` | Container registry (e.g., `nvcr.io`) |
+| `image` | Base image path and tag |
+| `name` | Human-readable name for the base environment |
+| `cuda_version` | CUDA version installed (e.g., `12.0`). **Important for GPU work - THIS IS THE VERSION OF CUDA IN THE CONTAINER** |
+| `entrypoint_script` | Path to custom entrypoint script that is exec'd inside the AI Workbench entrypoint script (usually empty) |
+
+### User Info (`environment.base.user_info`)
+
+Indicates if the base container has a specific non-root user that should be used:
+
+```yaml
+user_info:
+  uid: "1001"
+  gid: "1000"
+  username: rapids
+```
+
+If empty, AI Workbench creates a non-root user (`workbench`) matching host permissions so bind mounts work correctly. If it is set, AI Workbench handles making UID/GID match by either launching the container with the appropriate args or remapping permissions.
+
+### Package Managers (`environment.base.package_managers`)
+
+Shows available package managers in the container and pre-installed packages:
+
+```yaml
+package_managers:
+  - name: apt
+    binary_path: /usr/bin/apt
+    installed_packages: [curl, git, python3, ...]
+  - name: pip
+    binary_path: /usr/bin/pip
+    installed_packages: [jupyterlab==4.3.5]
+```
+
+**Note**: What packages are listed as `installed_packages` is informational and not always accurate — always inspect the container directly (e.g., `pip freeze`) for accurate installed packages.
+
+### Package Manager Environment
+
+If the base container was built using a conda or virtual environments:
+
+```yaml
+package_manager_environment:
+  name: "conda"         # "conda" or "venv"
+  target: "/opt/conda"  # Path to environment
+```
+
+### Compose File Path
+
+For multi-container environments, AI Workbench can start Docker Compose services alongside the project container. See `.cursor/rules/ai-workbench/compose.mdc` for rules if multiple containers are needed.
+
+AI Workbench supports a handful of default paths but you can specify a custom one:
+
+```yaml
+compose_file_path: "my-app/docker-compose.yml"  # Path to compose file (usually empty)
+```
+
+## Applications (`execution.apps`)
+
+Apps defined here are merged with any apps pre-installed in the base environment (`environment.base.apps`). Apps can be added without rebuilding.
+
+Three classes:
+
+### Native Apps (**do not modify**)
+
+Managed by AI Workbench for Cursor/VS Code connectivity:
+
+```yaml
+- name: cursor
+  type: cursor
+  class: native
+```
+
+### Process Apps
+
+Background processes (e.g. downloads, data processing, etc.):
+
+```yaml
+- name: Download Models
+  type: custom
+  class: process
+  start_command: /bin/bash ./download.sh # Command that is executed
+  health_check_command: pgrep -f "^/bin/bash ./download.sh" >/dev/null # returns true if running
+  stop_command: pkill -f "^/bin/bash ./download.sh" # command to stop the process
+  user_msg: "Downloading model files..." # message to display to the end user when starting
+  logfile_path: ""           # If set, streams this file; otherwise captures stdout
+  timeout_seconds: 3600 # time to complete the process or an error is raised
+  process_options:
+    wait_until_finished: true  # If true, UI waits for completion
+```
+
+### Web Apps
+
+Services routed through Traefik proxy for browser access (e.g. web apps, APIs, etc.):
+
+```yaml
+- name: inference
+  type: custom
+  class: webapp
+  start_command: python3 -m myapp # Command that is executed
+  health_check_command: curl -f "http://localhost:8080/" # returns true if running & ideally healthy/ready
+  stop_command: pkill -f "^python3 -m myapp" # command to stop the process
+  user_msg: "" # message to display to the end user when starting
+  timeout_seconds: 120 # time for the web app to become healthy/start
+  logfile_path: ""           # If set, UI streams this file; otherwise captures stdout
+  webapp_options:
+    autolaunch: true          # Auto-open browser when healthy
+    port: "8080"              # Local port to route
+    proxy:
+      trim_prefix: true       # Remove URL prefix before forwarding
+    url: http://localhost:8080/        # Static URL (use this OR url_command)
+    url_command: jupyter lab list ...  # Command to get URL (use this OR url)
+```
+
+When adding a web app it must be configured to run behind the reverse proxy. The `PROXY_PREFIX` env var is available in the `start_command` to provide the url prefix to an app.
+
+**CRITICAL: Environment Variable Inheritance in start_command**
+
+When using pipes (`|`) or subshells in `start_command`, environment variables like `PROXY_PREFIX` may not be inherited. You must explicitly pass them:
+
+```yaml
+# ❌ WRONG - PROXY_PREFIX won't be available to the Python process
+start_command: python3 app.py 2>&1 | tee app.log
+
+# ✅ CORRECT - Explicitly pass the variable
+start_command: PROXY_PREFIX=$PROXY_PREFIX python3 app.py 2>&1 | tee app.log
+```
+
+**CRITICAL: url requires a trailing slash** The `url` & `url_command` fields must have a trailing slash to route through the proxy properly (e.g. http://localhost:8080/ )
+
+## Resources (`execution.resources`)
+
+```yaml
+resources:
+  gpu:
+    requested: 1           # Number of GPUs (0 = no GPU)
+  sharedMemoryMB: 1024     # Size of /dev/shm in MB
+```
+
+`resources.gpu.requested` is the number of GPUs that will be passed from the host to the project container.
+
+**IMPORTANT**: You are running in the container and nvidia-smi will return only what is passed to the container. You may need to ask the user how many GPUs their system has if you need to change `resources.gpu.requested` or understand what is possible.
+
+## Secrets (`execution.secrets`)
+
+For sensitive environment variables (API keys, tokens). AI Workbench prompts users for values before container start so only the key needs to be configured:
+
+```yaml
+secrets:
+  - variable: HF_TOKEN
+    description: HuggingFace API token
+  - variable: OPENAI_API_KEY
+    description: OpenAI API key
+```
+
+**NEVER USE VARIABLES.ENV FOR SENSITIVE VALUES. ALWAYS USE SECRETS**
+
+To add a secret:
+1. Add entry to `execution.secrets` in spec.yaml
+2. Restart the container
+3. AI Workbench will prompt the user for the secret value on start
+
+## Mounts (`execution.mounts`)
+
+You configure additional mounts to persist data in the container:
+
+```yaml
+mounts:
+  - type: project          # Always present - the /project bind mount - DON'T EDIT THIS
+    target: /project/
+    description: Project directory
+    options: rw
+
+  - type: volume           # Docker/Podman managed volume 
+    target: /mnt/cache/
+    description: Persistent cache storage
+    options: ""
+
+  - type: host             # Bind mount from host (user prompted for source)
+    target: /mnt/data/
+    description: Local data directory
+    options: ""
+
+  - type: tmp              # Temporary mount
+    target: /mnt/scratch/
+    description: Fast scratch space
+    options: ""
+```
+
+**Requires container restart** after modifying mounts.
+
+Prefer volume mounts over host mounts where it makes sense because no user interaction is required. Only use host mounts if the data truly needs to share with the host file system easily.

@@ -1,0 +1,239 @@
+---
+description: Rules for Docker Compose and multi-container environments in AI Workbench (compose.yaml, docker-compose.yml, services, profiles, GPU allocation)
+alwaysApply: false
+---
+# Multi-Container Environments (Docker Compose)
+
+AI Workbench can run Docker Compose services alongside the project container for complex multi-service applications.
+
+The "project container" can be thought of as your development environment and compose containers as apps and services.
+
+The build context for docker compose is the project repo so you can build containers if needed with contents from the repo.
+
+## Compose File Basics
+
+### Valid File Names
+
+AI Workbench recognizes:
+- `compose.yaml` / `compose.yml`
+- `docker-compose.yaml` / `docker-compose.yml`
+
+### Default Locations
+
+- Project root: `/project/`
+- Deploy folder: `/project/deploy/`
+
+### Custom Location
+
+Set `environment.compose_file_path` in `.project/spec.yaml`:
+
+```yaml
+compose_file_path: "./my-app/docker-compose.yml"
+```
+
+## Shared Volume
+
+AI Workbench automatically creates `/nvwb-shared-volume` mounted to all compose containers **and** the project container for file sharing between services. This doesn't show up in the compose file itself, but in a rendered file that is used.
+
+## Service Profiles
+
+Profiles allow conditional service activation:
+
+```yaml
+services:
+  always-runs:
+    image: myapp:latest
+    # No profile = always runs
+
+  gpu-service:
+    image: nvidia/cuda:12.2.0-base-ubuntu22.04
+    profiles: ["gpu"]  # Only runs when "gpu" profile selected
+```
+
+Select profiles in AI Workbench UI: **Project Tab > Environment > Compose** or **Project Tab > Dashboard**
+
+**Important**: If you add a service with a profile, tell the user to select that profile in the UI before starting the compose environment, otherwise the service won't run. You can verify which profiles are active by checking the Compose section in the Environment tab.
+
+Only use profiles for "optional" containers or for different conditions or configurations. Always document profiles and include in the Get Started section if helpful.
+
+## GPU Configuration
+
+### By Count (let AI Workbench assign GPUs)
+
+```yaml
+services:
+  inference:
+    image: nvcr.io/nim/meta/llama-3.1-8b-instruct:latest
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+### By Device ID (specific GPU assignment)
+
+```yaml
+services:
+  embedding:
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+
+  llm:
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1', '2']
+              capabilities: [gpu]
+```
+
+**When to use:**
+- `count`: When you don't care which specific GPUs (preferred)
+- `device_ids`: When you need precise GPU assignment or want to share GPUs between services (use the same ID in 2 or more services)
+
+### Multi-GPU with Shared Memory
+
+```yaml
+services:
+  large-model:
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 8
+              capabilities: [gpu]
+    shm_size: 20gb  # Required for inter-GPU communication
+```
+
+## Environment Variables and Secrets
+
+### Using AI Workbench Variables
+
+Variables and secrets configured in your project are available in the compose file using the same keys
+
+```yaml
+services:
+  myservice:
+    environment:
+      - MY_VAR=${PROJECT_VAR}        # PROJECT_VAR in variables.env
+      - MY_SECRET=${SECRET_NAME}      # SECRET_NAME in execution.secrets
+```
+
+### Special Variables
+
+- `PROXY_PREFIX`: Automatically injected, contains proxy routing path
+- `NVWB_TRIM_PREFIX=true`: Set to enable proxy routing. Set this variable (true or false) to route the service through the proxy. True strips prefix.
+
+## Service Communication
+
+AI Workbench automatically configures networking. Services communicate by service name as hostname:
+
+```yaml
+environment:
+  - API_URL=http://backend:8000  # Use service name as hostname
+```
+
+**Note**: Don't create custom networks — AI Workbench uses the `workbench` network automatically.
+
+## Volumes
+
+### Named Volumes (managed by Docker)
+
+```yaml
+services:
+  database:
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+volumes:
+  db-data:
+```
+
+### Bind Mounts (**avoid in Compose** - complex UX to provide source dir)
+
+```yaml
+services:
+  service:
+    volumes:
+      - ./data:/app/data                    # Relative to project
+      - ${MODEL_DIR:-/tmp}:/opt/nim/.cache  # With default
+```
+
+**Note**: Avoid bind mounts when possible due to UX complexity of source path management.
+
+## Service Dependencies and Healthchecks
+
+```yaml
+services:
+  frontend:
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  backend:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 2m  # Grace period for slow-starting services
+```
+
+**Dependency conditions:**
+- `service_started`: Wait for start (default)
+- `service_healthy`: Wait for healthcheck to pass
+- `service_completed_successfully`: Wait for exit code 0
+
+## Complete Example: NIM with Web Frontend
+
+```yaml
+services:
+  nim-llm:
+    image: nvcr.io/nim/meta/llama-3.1-8b-instruct:latest
+    runtime: nvidia
+    profiles: [gpu]
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 16gb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health/ready"]
+      interval: 10s
+      timeout: 20s
+      retries: 100
+      start_period: 10m
+
+  frontend:
+    image: myapp/chat-ui:latest
+    profiles: [gpu]
+    environment:
+      - NVWB_TRIM_PREFIX=true
+      - LLM_API_URL=http://nim-llm:8000
+    ports:
+      - "8080:8080"
+    depends_on:
+      nim-llm:
+        condition: service_healthy
+```
+
+**Note**: Exposed ports are accessible via AI Workbench's proxy when `NVWB_TRIM_PREFIX` is set. The proxy handles routing to compose services automatically.
